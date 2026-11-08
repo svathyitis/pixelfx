@@ -2,7 +2,8 @@
 // opens one effect with its options, a sprite sheet and the code to use it.
 
 import { effects, categories } from "../src/fx/index.js";
-import { createFrame, clearFrame, createFx, createAct, actBounds, composite, backdrop, drawActor, painterFor, stockActor, actorAlphaOf, PAL, BACKDROPS } from "../src/core/index.js";
+import { encodeGif } from "./gif.js";
+import { createFrame, clearFrame, createFx, createAct, actBounds, actTiming, composite, backdrop, drawActor, painterFor, stockActor, actorAlphaOf, PAL, BACKDROPS } from "../src/core/index.js";
 
 const REPO = "https://github.com/patch-gg/pixelfx";
 const FX = Object.entries(effects).map(([id, mod]) => {
@@ -251,21 +252,66 @@ function code(fx) {
   ].join("\n");
   $("#d-src").href = `${REPO}/blob/main/src/fx/${fx.id}.js`;
 }
-function sheet() {
+// every frame of the open effect with the current palette, mirror and seed, composited over `bg` (null = transparent)
+function frames(bg) {
   const fx = detail.fx, m = fx.meta, [w, h] = m.size, n = Math.max(1, Math.round(m.duration * m.fps) + (m.loop ? 0 : 1));
-  const cols = Math.min(n, Math.max(1, Math.ceil(Math.sqrt((n * h) / w)))), rows = Math.ceil(n / cols);
-  const cv = el("canvas", { width: cols * w, height: rows * h }), ctx = cv.getContext("2d");
-  const frame = createFrame(w, h), img = ctx.createImageData(w, h);
+  const frame = createFrame(w, h), out = [];
   const inst = createFx(fx.mod, { x: m.origin[0], y: m.origin[1], ...detail.opts, flip: detail.flip });
   for (let i = 0; i < n; i++) {
     if (i) inst.update(1 / m.fps);
     inst.draw(clearFrame(frame));
-    composite(frame, img.data, null);
-    ctx.putImageData(img, (i % cols) * w, Math.floor(i / cols) * h);
+    const data = new Uint8ClampedArray(w * h * 4);
+    composite(frame, data, bg);
+    out.push(data);
   }
+  return { w, h, n, out };
+}
+function download(name, blob) {
+  const a = el("a", { href: URL.createObjectURL(blob), download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+// the same Aseprite-style JSON as `node tools/render.mjs --sheet`, so the browser and the CLI hand an engine the same thing
+function sheetJson(fx, name, w, h, n, cols) {
+  const m = fx.meta, list = [];
+  for (let i = 0; i < n; i++) {
+    list.push({ filename: `${name} ${i}`, frame: { x: (i % cols) * w, y: Math.floor(i / cols) * h, w, h }, rotated: false, trimmed: false, spriteSourceSize: { x: 0, y: 0, w, h }, sourceSize: { w, h }, duration: Math.round(1000 / m.fps) });
+  }
+  return {
+    frames: list,
+    meta: {
+      app: "https://github.com/patch-gg/pixelfx", version: "1", image: `${name}.png`, format: "RGBA8888",
+      size: { w: cols * w, h: Math.ceil(n / cols) * h }, scale: "1",
+      frameTags: [{ name, from: 0, to: n - 1, direction: "forward" }],
+      pixelfx: { id: fx.id, name: m.name, fps: m.fps, loop: m.loop, frames: n, frameSize: [w, h], pivot: m.origin, columns: cols, ...(fx.mod.act ? { act: actTiming(fx.mod) } : {}) },
+    },
+  };
+}
+function sheet() {
+  const fx = detail.fx, m = fx.meta, name = fx.id.split("/")[1];
+  const { w, h, n, out } = frames(null);
+  const cols = Math.min(n, Math.max(1, Math.ceil(Math.sqrt((n * h) / w)))), rows = Math.ceil(n / cols);
+  const cv = el("canvas", { width: cols * w, height: rows * h }), ctx = cv.getContext("2d");
+  out.forEach((data, i) => ctx.putImageData(new ImageData(data, w, h), (i % cols) * w, Math.floor(i / cols) * h));
   const k = Math.max(1, Math.min(4, Math.floor(1100 / (cols * w))));
   const pic = el("img", { src: cv.toDataURL("image/png"), alt: `${m.name} sprite sheet`, width: cols * w * k, height: rows * h * k });
-  $("#d-sheet").replaceChildren(pic, el("p", { textContent: `${n} frames of ${w} × ${h} px, ${cols} across, ${m.fps} fps, ${m.loop ? "loops" : "plays once"}. Save the image, or run: node tools/render.mjs ${fx.id} --sheet` }));
+  const bar = el("div", { className: "row" }, [
+    btn("download png", () => cv.toBlob((b) => download(`${name}.png`, b))),
+    btn("download json", () => download(`${name}.json`, new Blob([JSON.stringify(sheetJson(fx, name, w, h, n, cols), null, 1)], { type: "application/json" }))),
+    btn("download gif", () => {
+      // a GIF has no soft edges, so it is flattened onto the dark backdrop and enlarged for viewing
+      const g = frames(0xff101010), z = Math.max(1, Math.min(4, Math.floor(480 / Math.max(w, h))));
+      const big = g.out.map((d) => {
+        const o = new Uint8ClampedArray(w * z * h * z * 4);
+        for (let y = 0; y < h * z; y++) for (let x = 0; x < w * z; x++) o.set(d.subarray(((Math.floor(y / z)) * w + Math.floor(x / z)) * 4, ((Math.floor(y / z)) * w + Math.floor(x / z)) * 4 + 4), (y * w * z + x) * 4);
+        return o;
+      });
+      download(`${name}.gif`, new Blob([encodeGif({ width: w * z, height: h * z, frames: big, fps: m.fps, loop: m.loop })], { type: "image/gif" }));
+    }),
+  ]);
+  $("#d-sheet").replaceChildren(pic, bar, el("p", { textContent: `${n} frames of ${w} \u00d7 ${h} px, ${cols} across, ${m.fps} fps, ${m.loop ? "loops" : "plays once"}. The JSON uses the same Aseprite-style layout as the command line sheet, and the GIF is a flattened preview. Or run: node tools/render.mjs ${fx.id} --sheet` }));
 }
 function wireDetail() {
   const d = $("#detail");
