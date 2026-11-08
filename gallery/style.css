@@ -199,3 +199,4 @@ pre {
 @media (max-width: 330px) {
   .tile.big { grid-column: auto; grid-row: auto; }
 }
+.sheetout .row { margin-top: 8px; }
